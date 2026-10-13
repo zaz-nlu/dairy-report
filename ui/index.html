@@ -1,0 +1,335 @@
+<!doctype html>
+<!-- P4 调试页：只为把 bridge.py 的每个接口点一遍。P5 漫画 UI 整个替换本文件，契约见 bridge.py 文件头。 -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>日报越狱 · 调试页</title>
+<style>
+  body { font: 14px "Microsoft YaHei", sans-serif; margin: 16px; background: #f4ecd8; color: #1a1a1a; }
+  button { margin: 2px; padding: 4px 10px; }
+  textarea, pre { width: 100%; box-sizing: border-box; font: 12px Consolas, monospace; }
+  pre { background: #fff; border: 2px solid #000; padding: 8px; max-height: 260px; overflow: auto; white-space: pre-wrap; }
+  .row { margin: 8px 0; }
+  #msg { color: #d7263d; }
+  form { background: #fff; border: 2px solid #000; padding: 8px 12px; }
+  fieldset { margin: 8px 0; border: 1px solid #888; }
+  label { display: inline-block; margin: 3px 12px 3px 0; }
+  small { color: #666; }
+  #view h4 { margin: 12px 0 4px; }
+  .box { background: #fff; border: 2px solid #000; padding: 4px 8px; max-height: 230px; overflow: auto; }
+  .ent { border-bottom: 1px dotted #aaa; padding: 2px 0; }
+  .ent.skip, .ent.ex { opacity: .4; text-decoration: line-through; }
+  .ent.off { opacity: .5; }
+  .grp { background: #fff; border: 2px solid #000; margin: 8px 0; padding: 2px 8px 6px; }
+  .grp.skipgrp { opacity: .6; }
+  .grph { padding: 4px 0; border-bottom: 2px solid #000; margin-bottom: 2px; }
+  .subh { font-weight: bold; font-size: 12px; color: #555; margin: 6px 0 2px; }
+  details.rest { margin-top: 6px; } details.rest summary { cursor: pointer; color: #666; font-size: 12px; }
+  .ent.talk { opacity: .55; }
+  .tag.talk { background: #888; }
+  .reply { color: #2e7d32; font-size: 12px; margin-left: 52px; }
+  .ent a.exlink { font-size: 12px; margin-left: 6px; white-space: nowrap; }
+  .tag { font-size: 11px; padding: 0 5px; border: 1px solid #000; color: #fff; }
+  .tag.git, .tag.svn { background: #2e7d32; } .tag.claude { background: #d97706; } .tag.codex { background: #1565c0; }
+  .it { background: #fff; border: 2px solid #000; padding: 4px 8px; margin: 4px 0; }
+  .it.doubt { border-color: #d7263d; }
+  .it pre.txt { border: 0; padding: 2px 0; margin: 2px 0 0; max-height: none; background: none; font: 13px "Microsoft YaHei", sans-serif; }
+  .stamp { color: #d7263d; border: 2px solid #d7263d; padding: 0 4px; font-weight: bold; }
+</style>
+</head>
+<body>
+<h3>日报越狱 · 调试页 <span id="msg"></span></h3>
+<div class="row">
+  <button onclick="call('get_state')">状态</button>
+  <button onclick="call('collect_now')">搜身</button>
+  <button onclick="reinterrogate()">审讯</button>
+  <button onclick="if(confirm('真的提交到日报系统？')) call('submit_now')">画押（真提交）</button>
+  <button onclick="call('history')">历史</button>
+  <button onclick="call('open_web')">打开日报系统</button>
+  <button onclick="call('hide_window')">进托盘</button>
+</div>
+<div class="row">
+  手记 <input id="note" size="40"> <button onclick="call('add_note', note.value)">加</button>
+  <small>（没写代码的日子，随手记一句，AI 当素材）</small>
+</div>
+
+<div id="view"></div>
+
+<form onsubmit="save(); return false">
+  <fieldset><legend>日报系统账号</legend>
+    <label>账号 <input id="username" size="14"></label>
+    <label>密码 <input id="password" type="password" size="14" placeholder="不改就留空"></label>
+    <button type="button" onclick="login()">登录并刷新下方选项</button>
+    <small>（账号密码保存后，下拉框每次打开都会自动从日报系统加载）</small>
+  </fieldset>
+  <fieldset><legend>默认值（留空 = 自动沿用你上一份日报里的选择，一般不用动）</legend>
+    <label>项目 <select id="default_project"></select></label>
+    <label>任务类型 <select id="task_type"></select></label>
+    <label>汇报人 <select id="report_user"></select></label>
+    <label>优先级 <select id="priority">
+      <option value="">沿用上次</option><option value="1">低</option><option value="2">中</option><option value="3">高</option><option value="4">紧急</option></select></label>
+    <label>每日工时 <input id="hours" type="number" step="0.5" min="0.5" max="24" size="4"></label>
+  </fieldset>
+  <fieldset><legend>采集（git / Claude Code / Codex 自动读取，没装的自动跳过）</legend>
+    <label>每 <input id="collect_every_hours" type="number" min="1" max="24" style="width:50px"> 小时采集一次</label><br>
+    <label>额外 git 目录（一行一个）<br><textarea id="extra_repos" rows="2"></textarea></label>
+    <label>数据目录（留空 = D:\工作）<input id="data_dir" size="30"></label>
+  </fieldset>
+  <fieldset><legend>时间</legend>
+    <label>审讯（出草稿）<input id="interrogate_time" type="time"></label>
+    <label>自动提交 <input id="submit_time" type="time"></label>
+    <label><input type="checkbox" id="autostart"> 开机自启</label>
+  </fieldset>
+  <fieldset><legend>日期（一行一个，格式 2026-10-01；周六日默认休息）</legend>
+    <label>法定节假日（休息）<br><textarea id="holidays" rows="3" cols="18"></textarea></label>
+    <label>调休上班的周末<br><textarea id="workdays" rows="3" cols="18"></textarea></label>
+    <label>请假（会提交请假记录）<br><textarea id="leave_days" rows="3" cols="18"></textarea></label>
+  </fieldset>
+  <button type="submit"><b>保存设置</b></button>
+</form>
+
+<pre id="out"></pre>
+<script>
+  const $ = id => document.getElementById(id), out = $('out'), msg = $('msg');
+  const TEXT = ['username', 'data_dir', 'interrogate_time', 'submit_time'];
+  const NUM = ['hours', 'collect_every_hours', 'priority'];
+  const LINES = ['extra_repos', 'holidays', 'workdays', 'leave_days'];
+  const SELECTS = ['default_project', 'task_type', 'report_user'];
+
+  async function call(name, ...args) {
+    msg.textContent = name + ' 进行中…';
+    try {
+      const r = await window.pywebview.api[name](...args);
+      out.textContent = JSON.stringify(r, null, 1);
+      msg.textContent = '';
+      if (['collect_now', 'interrogate_now', 'submit_now', 'add_note', 'remove_note'].includes(name)) refresh();
+      return r;
+    } catch (e) { msg.textContent = name + ' 失败：' + (e.message || e); }
+  }
+
+  function fill(c) {
+    TEXT.concat(NUM).forEach(k => $(k).value = c[k] ?? '');
+    LINES.forEach(k => $(k).value = (c[k] || []).join('\n'));
+    $('autostart').checked = c.autostart;
+    $('password').placeholder = c.has_password ? '已保存，不改就留空' : '必填';
+    SELECTS.forEach(k => { if (!$(k).options.length) setOptions(k, c[k] ? [[c[k], c[k] + '（已保存，登录后可改）']] : [], c[k]); });
+  }
+  function setOptions(id, rows, cur) {
+    $(id).innerHTML = '<option value="">（自动沿用上次）</option>' + rows.map(([v, name]) =>
+      `<option value="${v}"${String(v) === String(cur) ? ' selected' : ''}>${name}</option>`).join('');
+  }
+  const lines = id => $(id).value.split('\n').map(s => s.trim()).filter(Boolean);
+
+  async function load() {
+    const c = await call('get_config');
+    if (c) { fill(c); if (c.username && c.has_password) loadOptions(); }  // 账号已存 → 自动从日报系统取下拉选项
+    return c;
+  }
+
+  async function loadOptions() {
+    const o = await call('fetch_options');
+    if (!o) return;
+    const c = await call('get_config');
+    setOptions('default_project', o.projects.map(x => [x.projectId, x.projectName]), c.default_project);
+    setOptions('task_type', o.task_types.map(x => [x.projectTypeId, x.projectTypeName]), c.task_type);
+    setOptions('report_user', o.report_users.map(x => [x.id, x.label]), c.report_user);
+    msg.textContent = '选项已从日报系统加载';
+  }
+
+  async function save() {
+    const cfg = {};
+    TEXT.forEach(k => cfg[k] = $(k).value.trim());
+    NUM.forEach(k => cfg[k] = k === 'priority' && $(k).value === '' ? null : Number($(k).value));  // 只有优先级可留空（沿用上次）
+    LINES.forEach(k => cfg[k] = lines(k));
+    SELECTS.forEach(k => cfg[k] = $(k).value || null);
+    const c = await call('save_config', cfg, $('password').value || null);
+    if (!c) return;
+    if (c.autostart !== $('autostart').checked) await call('set_autostart', $('autostart').checked);
+    $('password').value = '';
+    await load();
+    msg.textContent = '已保存';
+  }
+
+  async function login() {  // 只存账号密码并刷新下拉框，不动其他设置
+    if (!$('username').value || !($('password').value || (await call('get_config')).has_password)) {
+      msg.textContent = '账号和密码都要填'; return;
+    }
+    await call('save_config', { username: $('username').value.trim() }, $('password').value || null);
+    $('password').value = '';
+    await load();
+  }
+
+  // ---- 今日采集 / 草稿 / 结果 的可读显示 ----
+  const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const SRC = { git: 'git', svn: 'SVN', claude: 'Claude', codex: 'Codex' };
+  const tail = f => f.split(/[\\/]/).slice(-2).join('/');
+  const RESULT = { submitted: '已提交', exists: '系统里已有今天的日报，未重复提交', failed: '提交失败', empty: '没采到工作痕迹，未提交' };
+
+  let cur = null;  // 最近一次 get_state；编辑草稿、渲染下拉框都用它
+
+  // 项目下拉：最近日报里用过的排前面。blank 非 null = 加一个空选项（文案为 blank），否则没选时提示「请选」
+  const SKIP = '__skip__';  // repo_projects 的特殊值：私人项目，不上报
+  function projOptions(selected, blank, extra = '') {
+    const names = cur.project_names, recent = cur.recent_projects.filter(id => names[id]);
+    const rest = Object.keys(names).filter(id => !recent.includes(id));
+    const opt = id => `<option value="${esc(id)}"${id === selected ? ' selected' : ''}>${esc(names[id])}</option>`;
+    const head = blank != null ? `<option value="">${blank}</option>`
+      : (names[selected] ? '' : '<option value="">（未定，请选）</option>');
+    return head + extra + (recent.length ? `<optgroup label="最近用过">${recent.map(opt).join('')}</optgroup>` : '')
+      + `<optgroup label="全部项目">${rest.map(opt).join('')}</optgroup>`;
+  }
+
+  function draftCard(it, i) {
+    return `<div class="it ${it.doubt ? 'doubt' : ''}">`
+      + `项目 <select class="d-proj">${projOptions(it.projectId, null)}</select> `
+      + `工时 <input class="d-hrs" type="number" min="0.5" max="24" step="0.5" style="width:60px" value="${it.workTime}"> 小时 `
+      + `完成 <input class="d-pct" type="number" min="0" max="100" step="5" style="width:60px" value="${it.completionDegree}">% `
+      + (it.doubt ? '<span class="stamp">存疑</span> ' : '') + `<a href="#" onclick="delItem(${i}); return false">删除这条</a>`
+      + `<textarea class="d-txt" rows="${Math.max(3, it.workInfo.split('\n').length + 1)}">${esc(it.workInfo)}</textarea></div>`;
+  }
+
+  const readDraft = () => [...document.querySelectorAll('#view .it')].map(el => ({
+    workInfo: el.querySelector('.d-txt').value.trim(),
+    projectId: el.querySelector('.d-proj').value || null,
+    workTime: Number(el.querySelector('.d-hrs').value),
+    completionDegree: Number(el.querySelector('.d-pct').value),
+    doubt: false,  // 人看过、选过了就不再存疑
+  })).filter(x => x.workInfo);
+
+  function setItems(items) {  // 加/删只改页面上的草稿，点「保存草稿」才落盘
+    cur.draft = { ...(cur.draft || { provider: 'manual', generated_at: new Date().toISOString() }), items };
+    render();
+  }
+  const delItem = i => setItems(readDraft().filter((_, k) => k !== i));
+  const addItem = () => setItems(readDraft().concat([{ workInfo: '1.', projectId: cur.recent_projects[0] || null,
+    workTime: 1, completionDegree: 100, doubt: false }]));
+  async function saveDraft() {
+    const r = await call('save_draft', readDraft());
+    if (r) { await refresh(); msg.textContent = '草稿已保存（手改过的草稿 17:30 不会被自动覆盖）'; }
+  }
+  // 改了仓库归属 / 单条不上报后，自动按新选择重新生成草稿给用户预览；连续改几下只生成一次
+  let regenTimer = null, regenerating = false;
+  function scheduleRegen() {
+    clearTimeout(regenTimer);
+    regenTimer = setTimeout(reinterrogate, 1200);
+  }
+  async function reinterrogate() {
+    if (cur && cur.draft && cur.draft.edited_at && !confirm('草稿你手改过，按新的选择重新生成会覆盖掉，继续吗？')) return;
+    regenerating = true;
+    render();
+    await call('interrogate_now');  // 成功后 call() 会自己 refresh()
+    regenerating = false;
+    render();
+  }
+
+  async function setRepo(sel) {
+    const repo = sel.dataset.repo;
+    await call('set_repo_project', repo, sel.value);
+    if (sel.value) cur.repo_projects[repo] = sel.value; else delete cur.repo_projects[repo];
+    msg.textContent = `已记住：${repo} → ${sel.value === SKIP ? '不上报' : sel.value ? cur.project_names[sel.value] : '让 AI 判断'}，正在重新生成预览`;
+    scheduleRegen();
+    await refresh();  // 后端按新归属重新判定每条进不进日报
+  }
+
+  // 勾选 / 取消某条进这份日报；永不上报 / 恢复；改回看范围 —— 都由后端重新判定，然后自动重新生成预览
+  async function pick(cb) {
+    const r = await call('pick_entry', cb.dataset.uid, cb.checked);
+    if (!r) { cb.checked = !cb.checked; return; }
+    await refresh();
+    msg.textContent = (cb.checked ? '已算进这份日报' : '已移出这份日报（回看范围选 3 天/一周时，后面几天还能再报）') + '，正在重新生成预览';
+    scheduleRegen();
+  }
+  async function setNever(a, on) {
+    if (!await call('exclude_entry', a.dataset.key, on, a.dataset.date)) return;
+    await refresh();
+    msg.textContent = (on ? '这条永远不会进日报' : '已恢复') + '，正在重新生成预览';
+    scheduleRegen();
+  }
+  async function setLookback(v) {
+    if (!await call('save_config', { lookback_days: Number(v) }, null)) return;
+    await refresh();
+    msg.textContent = '回看范围已改，正在重新生成预览';
+    scheduleRegen();
+  }
+
+  async function refresh() {
+    try { cur = await window.pywebview.api.get_state(); } catch (e) { return; }  // 不走 call()，免得覆盖下面的 JSON 输出
+    render();
+  }
+
+  function render() {
+    const s = cur;
+    // 每条进不进这份日报由后端 annotate 判定（e.included / e.why），前端只负责显示和勾选
+    const WHY = { private: '私人项目·不上报', never: '永不上报', talk: '仅对话·默认不算', unpicked: '你取消了', picked: '你勾选的', work: '' };
+    const whyText = w => w.startsWith('reported:') ? `已在 ${w.slice(14)} 的日报里报过` : WHY[w];
+    const used = s.entries.filter(e => e.included);
+    const older = used.filter(e => e.date !== s.today).length;
+    const isCommit = e => e.source === 'git' || e.source === 'svn';
+    const changed = e => isCommit(e) || e.files.length > 0;  // 改了仓库里的代码
+    const shown = e => changed(e) && e.why !== 'private' && !e.why.startsWith('reported:');  // 主列表只放这些，其余折叠
+
+    const row = e => {
+      const locked = e.why === 'private' || e.why === 'never' || e.why.startsWith('reported:');
+      const label = whyText(e.why);
+      return `<div class="ent${e.included ? '' : ' off'}"><label><input type="checkbox"${e.included ? ' checked' : ''}${locked ? ' disabled' : ''} `
+        + `data-uid="${esc(e.uid)}" onchange="pick(this)"> <b>${e.date !== s.today ? e.date.slice(5) + ' ' : ''}${e.time}</b></label> `
+        + (label ? `<span class="tag talk">${label}</span> ` : '')
+        + `${esc(e.text.slice(0, 160))}`
+        + (!isCommit(e) && changed(e) && e.reply ? `<div class="reply">→ ${esc(e.reply.slice(0, 160))}</div>` : '')
+        + (e.files.length ? ` <small>改了 ${e.files.length} 个文件：${esc(e.files.slice(0, 3).map(tail).join('、'))}</small>` : '')
+        + (e.why === 'never' ? ` <a href="#" class="exlink" data-key="${esc(e.key)}" data-date="${e.date}" onclick="setNever(this, false); return false">恢复</a>`
+          : locked ? '' : ` <a href="#" class="exlink" data-key="${esc(e.key)}" data-date="${e.date}" onclick="setNever(this, true); return false">永不上报</a>`)
+        + '</div>';
+    };
+    const sub = (title, rows) => rows ? `<div class="sub"><div class="subh">${title}</div>${rows}</div>` : '';
+    const skipOpt = r => `<option value="${SKIP}"${s.repo_projects[r] === SKIP ? ' selected' : ''}>🚫 不上报（私人项目）</option>`;
+
+    // 按仓库分组：每组 = 项目下拉 + 提交记录 + AI 对话里改了代码的 + 未提交改动 + 折叠的其余记录
+    const repos = [...new Set(s.entries.map(e => e.project).concat(s.snapshots.map(x => x.project)))];
+    const nShown = r => s.entries.filter(e => e.project === r && shown(e)).length;
+    repos.sort((a, b) => nShown(b) - nShown(a));
+    const groups = repos.map(r => {
+      const es = s.entries.filter(e => e.project === r);
+      const commits = es.filter(e => shown(e) && isCommit(e)), chats = es.filter(e => shown(e) && !isCommit(e));
+      const rest = es.filter(e => !shown(e));
+      const snap = s.snapshots.filter(x => x.project === r).slice(-1)[0];  // 未提交改动只看最新一次快照
+      return `<div class="grp${s.repo_projects[r] === SKIP ? ' skipgrp' : ''}">`
+        + `<div class="grph"><b>${esc(r)}</b> → 属于项目 <select data-repo="${esc(r)}" onchange="setRepo(this)">`
+        + projOptions(s.repo_projects[r], '（让 AI 判断）', skipOpt(r)) + `</select></div>`
+        + sub(`提交记录（${commits.length}）`, commits.map(row).join(''))
+        + sub(`AI 对话里改了代码的（${chats.length}）`, chats.map(row).join(''))
+        + (snap ? sub('未提交的改动（今天动过的文件）', `<div class="ent"><small>${esc(snap.files.slice(0, 8).map(tail).join('、'))}${snap.files.length > 8 ? ' 等 ' + snap.files.length + ' 个' : ''}</small></div>`) : '')
+        + (!commits.length && !chats.length && !snap ? '<div class="sub"><small>没有改代码的记录</small></div>' : '')
+        + (rest.length ? `<details class="rest"><summary>其他 ${rest.length} 条（纯聊天 / 已报过 / 私人，默认不算；纯聊天可展开勾选算进去）</summary>${rest.map(row).join('')}</details>` : '')
+        + '</div>';
+    }).join('');
+    const nChanged = s.entries.filter(shown).length;
+    const notes = s.notes.map((n, i) => `<div class="ent"><b>${n.time}</b> 手记：${esc(n.text)} <a href="#" onclick="call('remove_note', ${i}); return false">删</a></div>`).join('');
+    const items = s.draft ? s.draft.items : [];
+    const total = items.reduce((a, it) => a + Number(it.workTime || 0), 0);
+    const r = s.result;
+    $('view').innerHTML =
+      `<h4>工作记录 <select onchange="setLookback(this.value)">`
+      + [[1, '只看今天'], [3, '最近 3 天'], [7, '最近一周']].map(([v, t]) =>
+        `<option value="${v}"${v === Number(s.lookback_days) ? ' selected' : ''}>${t}</option>`).join('')
+      + `</select> 改了代码的共 ${nChanged} 条，勾选的 <span style="color:#2e7d32">${used.length} 条</span>写进这份日报`
+      + `${older ? `（其中 ${older} 条是前几天做完没报的）` : ''}；${s.collected_at ? '采集于 ' + s.collected_at.slice(11, 16) : '还没采集，点「搜身」'}</h4>`
+      + '<small>按仓库分组，在每组标题的下拉框里选这个仓库属于哪个项目（选一次以后都记住；私人项目选「不上报」）。只列改了代码的记录，'
+      + '取消勾选的会留到后面几天报，报过的自动锁住。改完下面的日报草稿会自动重新生成。</small>'
+      + (groups + notes || '<div class="box">（空）</div>')
+      + `<h4>日报草稿（可直接改）${s.draft && s.draft.provider ? `<small>　${esc(s.draft.provider)} 生成于 ${s.draft.generated_at.slice(11, 16)}${s.draft.edited_at ? '，已手改' : ''}</small>` : ''}</h4>`
+      + (regenerating ? '<div class="box">⏳ 正在按你的选择重新生成日报预览（AI 整理约 30–60 秒）……</div>'
+        : items.length ? items.map(draftCard).join('')
+        : `<div class="box">（按现在的选择，今天没有可写进日报的改动。在上面「手记」写一句，或点下面「加一条」手填；不处理的话 ${s.submit_time} 不会提交）</div>`)
+      + `<div class="row"><button onclick="addItem()">＋ 加一条</button> <button onclick="saveDraft()"><b>保存草稿</b></button> <small>合计 ${total} 小时</small></div>`
+      + `<h4>提交：${r ? esc(RESULT[r.status] || r.status) + '（' + r.at.slice(11, 16) + '）' + (r.error ? ' ' + esc(r.error) : '') : '还没提交，' + s.submit_time + ' 自动提交'}</h4>`;
+  }
+
+  window.onBackendEvent = e => {
+    if (e.type === 'notify') msg.textContent = e.title + '：' + e.message;
+    if (e.type === 'state') refresh();
+  };
+  window.addEventListener('pywebviewready', () => { refresh(); load(); });
+</script>
+</body>
+</html>

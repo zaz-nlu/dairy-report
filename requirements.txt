@@ -1,0 +1,4 @@
+pywebview
+pystray
+Pillow
+keyring
