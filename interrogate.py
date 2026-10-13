@@ -2,15 +2,20 @@
 
 用法：python interrogate.py [YYYY-MM-DD]（默认今天，需先 collect）
 AI 自动选：有 claude 用 `claude -p`，否则 `codex exec`；都沿用本机已配好的后端。
-草稿条目：{workInfo, projectId, workTime, completionDegree, doubt}，按项目一条。
+草稿条目：{workInfo, projectId, workTime, completionDegree, doubt, basis}，按项目一条。
+
+分工：AI 只负责「归项目 + 写文字 + 说明每条依据哪几条证据」；工时和完成度由代码按证据体量、状态计算
+（可审计、可复现，也让小模型够用）。没有有效依据的条目直接判不合格，不会进日报。
 """
 import json
+import math
 import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import date, datetime
 from pathlib import Path
 
@@ -23,10 +28,10 @@ SCHEMA = {
     "type": "object", "additionalProperties": False, "required": ["items"],
     "properties": {"items": {"type": "array", "items": {
         "type": "object", "additionalProperties": False,
-        "required": ["workInfo", "projectId", "workTime", "completionDegree", "confidence"],
+        "required": ["workInfo", "projectId", "confidence", "evidence"],
         "properties": {"workInfo": {"type": "string"}, "projectId": {"type": ["string", "null"]},
-                       "workTime": {"type": "number"}, "completionDegree": {"type": "number"},
-                       "confidence": {"type": "number"}}}}}}
+                       "confidence": {"type": "number"},
+                       "evidence": {"type": "array", "items": {"type": "integer"}}}}}}}
 
 PROMPT = """你是日报整理员。根据下面的「今日证据」替用户写今天的工作日报。
 
@@ -40,13 +45,14 @@ PROMPT = """你是日报整理员。根据下面的「今日证据」替用户�
 4. projectId：从「可选项目」里选最匹配的 id（原样照抄字符串）。「最近日报」是用户自己的归类习惯：同类工作（相同的产品、模块、仓库、需求）沿用历史里的项目，
    除非今天的证据明显属于另一个项目；仓库名对不上项目名很正常，以工作内容为准。实在判断不了填 null。
    证据行末尾带「用户已指定归属」的，必须归入所指定的项目（id 照抄），confidence 填 1，不得改动。
-5. workTime：各条之和 = {hours} 小时，按工作量分配。
-6. completionDegree：0-100，该项工作到今天结束的完成度估计。
+5. evidence：这一条日报依据了哪几条证据，填证据行开头【】里的编号（整数数组），每条至少 1 个，且只能引用下面真实存在的编号。
+   没有证据支持的内容不要写——宁可少写，也不要写证据里没有的事。
+6. 不需要填工时和完成度，程序会按证据自己计算。
 7. confidence：0-1，你对 projectId 归属的把握。
 8. 不要调用任何工具，直接输出。
 
 只输出一个 JSON 对象，不要任何其他文字：
-{{"items":[{{"workInfo":"1.…… 2.……","projectId":"12","workTime":4,"completionDegree":80,"confidence":0.9}}]}}
+{{"items":[{{"workInfo":"1.…… 2.……","projectId":"12","confidence":0.9,"evidence":[1,3,4]}}]}}
 
 可选项目（id: 名称）：
 {projects}
@@ -54,9 +60,14 @@ PROMPT = """你是日报整理员。根据下面的「今日证据」替用户�
 最近日报（用户自己写的，归类和写法的参考）：
 {history}
 
-今日证据（时间 [来源] 仓库: 需求 → 结果 | 改动文件）：
+今日证据（【编号】时间 [来源] 仓库: 需求 → 结果 | 改动文件）：
 {evidence}
 """
+
+# 结果/提交说明里出现这些，说明工作没收尾：完成度要打折，不能当成已完成
+PARTIAL = re.compile(r"待验证|待测试|没跑|未跑|没测|未测试|还没提交|没做完|未完成|进行中|WIP|TODO", re.I)
+# 完成度（按证据状态，不靠模型估）：{(有提交, 有未收尾标记): %}；只有手记的算 100（用户亲口说做完的）
+COMPLETION = {(True, False): 100, (True, True): 80, (False, False): 70, (False, True): 50}
 
 
 SKIP = "__skip__"  # repo_projects 里的特殊值：这个仓库是私人项目，一律不上报（连 AI 都不给看）
@@ -77,12 +88,12 @@ def uid(day, e):
     return f"{day}|{entry_key(e)}"
 
 
-def annotate(day, raws, repo_projects, excluded, picks, reported):
+def annotate(day, raws, repo_projects, excluded, picks, reported, maybe=None):
     """决定范围内每条记录进不进 day 这份日报（「存货」模型：做完没报的活可以挪到后面几天报）。
 
     raws: {日期: raw}（回看范围内每天的采集）；excluded: {日期: [entry_key]}（永不上报）
-    picks: {uid: bool}（用户对这份日报的手动勾选）；reported: {uid: 已报在哪天}
-    返回 entries 加上 date / uid / included / why；why ∈ private|never|reported:日期|picked|unpicked|work|talk
+    picks: {uid: bool}（用户对这份日报的手动勾选）；reported: {uid: 已报在哪天}；maybe: {uid: 日期}（那天手写过日报、但不知道写了啥：不锁，默认不勾）
+    返回 entries 加上 date / uid / included / why；why ∈ private|never|reported:日期|maybe:日期|picked|unpicked|work|talk
     默认规则：有实际改动的（今天的、或前几天没报的）算进去，纯聊天不算；用户勾选优先；报过的锁死防重复
     """
     skip = {r for r, v in (repo_projects or {}).items() if v == SKIP}
@@ -99,6 +110,8 @@ def annotate(day, raws, repo_projects, excluded, picks, reported):
                 why, inc = f"reported:{reported[u]}", False
             elif u in picks:
                 why, inc = ("picked" if picks[u] else "unpicked"), bool(picks[u])
+            elif u in (maybe or {}) and maybe[u] != day:
+                why, inc = f"maybe:{maybe[u]}", False
             else:
                 why, inc = ("work", True) if is_work(e) else ("talk", False)
             out.append({**e, "date": d, "uid": u, "included": inc, "why": why})
@@ -125,27 +138,58 @@ def short_path(f, parts=3):
     return "/".join(Path(f).parts[-parts:])
 
 
-def build_prompt(raw, notes, projects, hours, history=(), repo_projects=None):
+def collect_evidence(raw, notes, projects, repo_projects=None):
+    """编号证据 [{n, line, files, kind, partial}]。提示词给 AI 看的和后面算工时、完成度用的是同一份，
+    AI 引用的编号才对得上。kind：commit（git/svn 提交）/ chat（AI 对话里改了代码）/ uncommitted / note"""
     names = {p["projectId"]: p["projectName"] for p in projects}
     fixed = {r: pid for r, pid in (repo_projects or {}).items() if pid in names}
-    lines = []
+    pin = lambda proj: f' 【用户已指定归属：{names[fixed[proj]]}（id {fixed[proj]}）】' if proj in fixed else ""
+    ev = []
     for e in sample(raw.get("entries", []), MAX_ENTRIES):
+        commit = e["source"] in ("git", "svn")
         files = ", ".join(short_path(f) for f in e["files"][:5])
-        pin = f' 【用户已指定归属：{names[fixed[e["project"]]]}（id {fixed[e["project"]]}）】' if e["project"] in fixed else ""
-        what = (f'{e["text"]}' if e["source"] in ("git", "svn")  # 提交说明本身就是结果
+        what = (e["text"] if commit  # 提交说明本身就是结果
                 else f'需求「{e["text"][:120]}」→ 结果「{e.get("reply") or "（无总结）"}」')
         when = e["time"] if e.get("date", raw.get("date")) == raw.get("date") else f'{e["date"][5:]} {e["time"]}'
-        lines.append(f'{when} [{e["source"]}] {e["project"]}: {what}'.replace("\n", " ")
-                     + (f" | {files}" if files else "") + pin)
+        ev.append({"line": f'{when} [{e["source"]}] {e["project"]}: {what}'.replace("\n", " ")
+                           + (f" | {files}" if files else "") + pin(e["project"]),
+                   "files": set(e["files"]), "kind": "commit" if commit else "chat",
+                   "partial": bool(PARTIAL.search(e["text"] if commit else e.get("reply") or ""))})
     for s in raw.get("snapshots", [])[-5:]:
-        pin = f' 【用户已指定归属：{names[fixed[s["project"]]]}（id {fixed[s["project"]]}）】' if s["project"] in fixed else ""
-        lines.append(f'{s["time"]} [未提交改动] {s["project"]}: ' + ", ".join(short_path(f) for f in s["files"][:10]) + pin)
+        ev.append({"line": f'{s["time"]} [未提交改动] {s["project"]}: '
+                           + ", ".join(short_path(f) for f in s["files"][:10]) + pin(s["project"]),
+                   "files": set(s["files"]), "kind": "uncommitted", "partial": False})
     for n in notes:
-        lines.append(f'{n["time"]} [用户手记] {n["text"]}')
+        ev.append({"line": f'{n["time"]} [用户手记] {n["text"]}', "files": set(), "kind": "note", "partial": False})
+    for i, x in enumerate(ev, 1):
+        x["n"] = i
+    return ev
+
+
+def item_weight(ev, ids):
+    """一条日报的工作量权重 = 去重后的改动文件数开方 + 每条依据 0.5 + 每条手记 1。
+    按文件并集算，同一批文件的提交和对话不会被算两遍；开方是为了改 100 个文件不至于比改 10 个多十倍工时。
+    ponytail: 文件数只是体量的粗略代理，要更准可以给 git 采 --numstat 的增删行数"""
+    picked = [ev[i - 1] for i in ids]
+    files = set().union(*[x["files"] for x in picked]) if picked else set()
+    return max(1.0, math.sqrt(len(files)) + 0.5 * len(picked)) + sum(1 for x in picked if x["kind"] == "note")
+
+
+def completion(ev, ids):
+    """完成度按证据状态定：有提交且没说待验证 100；有提交但说没测完 80；只改了没提交 70（说没收尾 50）；纯手记 100"""
+    picked = [ev[i - 1] for i in ids]
+    if all(x["kind"] == "note" for x in picked):
+        return 100
+    return COMPLETION[(any(x["kind"] == "commit" for x in picked), any(x["partial"] for x in picked))]
+
+
+def build_prompt(raw, notes, projects, hours, history=(), repo_projects=None):
+    ev = collect_evidence(raw, notes, projects, repo_projects)
     proj = "\n".join(f'- {p["projectId"]}: {p["projectName"]}' for p in projects) or "（无，projectId 一律填 null）"
     past = "\n".join(f'{d["date"]} 【{i["project"]}】{i["text"][:200]}'.replace("\n", " ")
                      for d in history for i in d["items"]) or "（无）"
-    return PROMPT.format(max_items=MAX_ITEMS, hours=hours, projects=proj, history=past, evidence="\n".join(lines))
+    return PROMPT.format(max_items=MAX_ITEMS, projects=proj, history=past,
+                         evidence="\n".join(f'【{x["n"]}】{x["line"]}' for x in ev))
 
 
 def _newest(root, pattern):
@@ -153,22 +197,79 @@ def _newest(root, pattern):
     return [str(found[0])] if found else []
 
 
-def providers():
-    """[(名字, exe 路径)]，按优先级。codex 常装了好几份：PATH 里可能是老的 npm 版（不认新模型），
-    桌面版 / VS Code 插件自带的更新，所以都列上，挂了换下一个"""
-    local = Path(os.environ.get("LOCALAPPDATA", ""))
-    codex = (_newest(local / "OpenAI/Codex/bin", "*/codex.exe")
-             + _newest(Path.home() / ".vscode/extensions", "openai.chatgpt-*/bin/*/codex.exe")
-             + [p for p in [shutil.which("codex")] if p])
-    found = [("claude", p) for p in [shutil.which("claude")] if p] + [("codex", p) for p in codex]
-    return list(dict.fromkeys(found))
+def _fresh_path():
+    """进程启动后才装的工具，不在当前进程的 PATH 里（装完要重启才生效）：直接读注册表里最新的用户 + 系统 PATH"""
+    parts = []
+    if os.name == "nt":
+        import winreg
+        for root, sub in ((winreg.HKEY_CURRENT_USER, "Environment"),
+                          (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")):
+            try:
+                with winreg.OpenKey(root, sub) as k:
+                    parts.append(os.path.expandvars(winreg.QueryValueEx(k, "Path")[0]))
+            except OSError:
+                pass
+    return os.pathsep.join(parts + [os.environ.get("PATH", "")])
 
 
-def ask_parsed(prompt, provider, exe):
+def _locate(name):
+    """某个 AI 工具所有可能的可执行文件，按可靠程度排序。每个人装的位置都不一样：
+    命令行（PATH / 官方安装器 / npm）、桌面版、VS Code / Cursor / Windsurf 插件自带的二进制——
+    只装了编辑器插件的同事 PATH 里根本没有 claude，必须去插件目录找"""
+    home, local, appdata = Path.home(), Path(os.environ.get("LOCALAPPDATA", "")), Path(os.environ.get("APPDATA", ""))
+    on_path = shutil.which(name, path=_fresh_path())
+    if name == "claude":  # 用户平时在命令行里用的那份最可信，排第一；编辑器插件自带的兜底
+        found = [on_path, home / ".local/bin/claude.exe", appdata / "npm/claude.cmd"]
+        found += _newest(home, ".*/extensions/anthropic.claude-code-*/resources/native-binary/claude.exe")
+    else:  # codex 相反：桌面版 / 插件自带的比较新，PATH 里常是老版 npm 装的（不认新模型），放最后
+        found = _newest(local / "OpenAI/Codex/bin", "*/codex.exe")
+        found += _newest(home, ".*/extensions/openai.chatgpt-*/bin/*/codex.exe")
+        found += [on_path, appdata / "npm/codex.cmd"]
+    seen, out = set(), []
+    for p in found:
+        if p and Path(p).is_file() and os.path.normcase(str(p)) not in seen:  # Windows 路径不分大小写，别重复列
+            seen.add(os.path.normcase(str(p)))
+            out.append(str(p))
+    return out
+
+
+_providers_cache = {}
+
+
+def providers(extra=()):
+    """[(名字, exe 路径)]，按优先级；结果缓存 30 秒（界面刷新很频繁，别每次都扫磁盘和注册表）。
+    extra：用户在设置里手填的路径，最优先；文件名含 codex 的按 codex 调，其余按 claude 调
+    （比如公司给同事做了个 claude-ds.cmd，里面先设内网大模型的环境变量再启动 claude，填它就行）。
+    claude 只取找到的第一份——几份用的是同一个账号和配置，重试没意义；codex 保留全部，因为 PATH 里常是
+    老版 npm 装的（不认新模型），桌面版 / 插件自带的更新，挂了换下一个"""
+    key = tuple(extra)
+    hit = _providers_cache.get(key)
+    if hit and time.time() - hit[0] < 30:
+        return hit[1]
+    mine = [os.path.expandvars(p.strip().strip('"')) for p in extra if p.strip()]
+    found = [("codex" if "codex" in Path(p).name.lower() else "claude", p) for p in mine if Path(p).is_file()]
+    found += [("claude", p) for p in _locate("claude")[:1]] + [("codex", p) for p in _locate("codex")]
+    result = list(dict.fromkeys(found))
+    _providers_cache[key] = (time.time(), result)
+    return result
+
+
+def version_of(exe):
+    """exe --version 的第一行；跑不起来返回 ''。检测时用，快（15 秒封顶）"""
     try:
-        return parse(ask_ai(prompt, provider, exe))
-    except (ValueError, KeyError, json.JSONDecodeError) as e:  # 格式不对重试 1 次，把错误告诉它
-        return parse(ask_ai(prompt + f"\n\n上次输出不合格（{e}），请严格只输出 JSON。", provider, exe))
+        r = subprocess.run([exe, "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=15, creationflags=NO_WINDOW)
+        return (r.stdout or r.stderr).strip().splitlines()[0][:80] if r.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired, IndexError):
+        return ""
+
+
+def ask_parsed(prompt, provider, exe, n=None):
+    try:
+        return parse(ask_ai(prompt, provider, exe), n)
+    except (ValueError, KeyError, json.JSONDecodeError) as e:  # 格式不对 / 没依据，重试 1 次，把错误告诉它
+        return parse(ask_ai(prompt + f"\n\n上次输出不合格（{e}），请严格只输出 JSON，且每条都要有有效的 evidence 编号。",
+                            provider, exe), n)
 
 
 def ask_ai(prompt, provider, exe):
@@ -196,8 +297,10 @@ def ask_ai(prompt, provider, exe):
     return json.dumps(res["structured_output"]) if res.get("structured_output") else res.get("result", "")
 
 
-def parse(text):
-    """从模型输出里抠出 {"items": [...]} 并校验字段类型；不合格抛 ValueError"""
+def parse(text, n=None):
+    """从模型输出里抠出 {"items": [...]} 并校验；不合格抛 ValueError。
+    n = 证据条数：传了就要求每条日报的 evidence 至少引用 1 个真实存在的编号（1..n），无效编号去掉，
+    一个有效依据都没有的条目 = 凭空写的，整体判不合格（让 AI 重来，而不是放进日报）"""
     start, end = text.find("{"), text.rfind("}")
     if start < 0:
         raise ValueError("输出里没有 JSON")
@@ -207,8 +310,13 @@ def parse(text):
     for it in items:
         if not (isinstance(it.get("workInfo"), str) and it["workInfo"].strip()):
             raise ValueError(f"workInfo 缺失: {it}")
-        for k in ("workTime", "completionDegree", "confidence"):
-            float(it.get(k) or 0)  # 非数字直接抛
+        float(it.get("confidence") or 0)  # 非数字直接抛
+        if n is not None:
+            raw_ids = it.get("evidence")
+            ids = sorted({i for i in raw_ids if isinstance(i, int) and 1 <= i <= n}) if isinstance(raw_ids, list) else []
+            if not ids:
+                raise ValueError(f"没有有效依据（evidence 必须是 1..{n} 里的编号）: {it['workInfo'][:40]}")
+            it["evidence"] = ids
     return items
 
 
@@ -231,27 +339,28 @@ def merge_points(texts):
     return "\n".join(f"{i}.{p}" for i, p in enumerate(points, 1))
 
 
-def finalize(items, projects, hours, default_project):
-    """数值规整、同项目合并都在代码里做，不靠 AI；拿不准的项目 → 默认项目并标 doubt"""
+def finalize(items, projects, hours, default_project, ev):
+    """同项目合并、工时、完成度都在代码里算，不靠 AI：
+    工时 = 总工时按各条依据的体量权重分配；完成度 = 按依据的状态定；拿不准的项目 → 默认项目并标 doubt。
+    每条带 basis（依据原文），界面可展开核对"""
     valid = {str(p["projectId"]) for p in projects}
-    merged = {}  # projectId → {texts, time, done, doubt}，保持首次出现顺序
+    merged = {}  # projectId → {texts, ids, doubt}，保持首次出现顺序
     for it in items:
         pid = None if it.get("projectId") is None else str(it["projectId"])
-        m = merged.setdefault(default_project if pid not in valid else pid,
-                              {"texts": [], "time": 0.0, "done": 0.0, "doubt": False})
+        m = merged.setdefault(default_project if pid not in valid else pid, {"texts": [], "ids": set(), "doubt": False})
         m["texts"].append(it["workInfo"].strip())
-        m["time"] += max(float(it.get("workTime") or 0), 0)
-        m["done"] = max(m["done"], float(it.get("completionDegree") or 0))
+        m["ids"] |= set(it["evidence"])
         m["doubt"] |= pid not in valid or float(it.get("confidence") or 0) < 0.6
-    rows = list(merged.items())[:MAX_ITEMS]
-    times = fit_hours([m["time"] for _, m in rows], hours)
+    rows = [(pid, m, sorted(m["ids"])) for pid, m in list(merged.items())[:MAX_ITEMS]]
+    times = fit_hours([item_weight(ev, ids) for _, _, ids in rows], hours)
     return [{"workInfo": merge_points(m["texts"]), "projectId": pid, "workTime": t,
-             "completionDegree": min(100, max(0, round(m["done"] / 5) * 5)), "doubt": m["doubt"]}
-            for (pid, m), t in zip(rows, times)]
+             "completionDegree": completion(ev, ids), "doubt": m["doubt"],
+             "basis": [ev[i - 1]["line"] for i in ids][:12]}
+            for (pid, m, ids), t in zip(rows, times)]
 
 
 def interrogate(day, projects=(), hours=8.0, default_project=None, data_dir=None, provider=None, history=(),
-                repo_projects=None, evidence=None):
+                repo_projects=None, evidence=None, ai_paths=()):
     """返回并写入 draft.json；没有证据返回 items=[]（不编造，由调用方提醒用户手填）。
     evidence：调用方（bridge）按回看范围 + 用户勾选挑好的条目（annotate 里 included 的）；
     不传 = 命令行老路径：只用当天、按默认规则（有实际改动才算）"""
@@ -271,22 +380,24 @@ def interrogate(day, projects=(), hours=8.0, default_project=None, data_dir=None
     draft = {"date": day.isoformat(), "generated_at": datetime.now().isoformat(timespec="seconds"),
              "provider": None, "items": [],
              "used": [e["uid"] for e in evidence]}  # 提交成功后记账：这些条目已报，以后不会再被挪进别天的日报
-    if raw["entries"] or raw["snapshots"] or notes:
-        candidates = [c for c in providers() if c[0] == provider or not provider]
+    ev = collect_evidence(raw, notes, list(projects), repo_projects)
+    if ev:
+        candidates = [c for c in providers(ai_paths) if c[0] == provider or not provider]
         if not candidates:
-            raise RuntimeError("没找到 claude 或 codex 命令，无法审讯")
+            raise RuntimeError("没找到 claude 或 codex（命令行、桌面版、VS Code/Cursor 插件里都没有）。"
+                               "装了的话，去设置里「AI 工具」填上它的完整路径，点「检测」确认")
         prompt = build_prompt(raw, notes, list(projects), hours, history, repo_projects)
         errors = []
         for p, exe in candidates:  # 一个挂了（额度/配置/网络/版本旧）换下一个，18:00 前不能断
             try:
-                items = ask_parsed(prompt, p, exe)
+                items = ask_parsed(prompt, p, exe, n=len(ev))
                 break
             except Exception as e:
                 errors.append(f"{exe}: {e}")
         else:
             raise RuntimeError("审讯失败\n" + "\n".join(errors))
         draft["provider"] = p
-        draft["items"] = finalize(items, list(projects), hours, default_project)
+        draft["items"] = finalize(items, list(projects), hours, default_project, ev)
     (folder / "draft.json").write_text(json.dumps(draft, ensure_ascii=False, indent=1), "utf-8")
     return draft
 

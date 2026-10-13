@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- 调试页（P4）：把 bridge.py 的每个接口都点得到。正式界面替换 index.html 后留作参考：每个功能的前端调用方式都在这里。 -->
+<!-- 调试页：把 bridge.py 的每个接口都点得到，功能全但样子难看。正式界面是 index.html；这里留作参考和排错（设置里有链接）。 -->
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
@@ -20,8 +20,15 @@
   .ent { border-bottom: 1px dotted #aaa; padding: 2px 0; }
   .ent.skip, .ent.ex { opacity: .4; text-decoration: line-through; }
   .ent.off { opacity: .5; }
+  #busy { display: none; position: sticky; top: 0; z-index: 10; background: #ffd23f; border: 2px solid #000; padding: 4px 10px; margin: 0 0 8px; font-weight: bold; }
+  #busy .track { height: 6px; background: #fff; border: 1px solid #000; overflow: hidden; margin-top: 4px; }
+  #busy .bar { width: 30%; height: 100%; background: #d7263d; animation: slide 1.1s linear infinite; }
+  @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+  button:disabled { opacity: .5; cursor: wait; }
   .grp { background: #fff; border: 2px solid #000; margin: 8px 0; padding: 2px 8px 6px; }
   .grp.skipgrp { opacity: .6; }
+  details.basis { margin-top: 4px; font-size: 12px; color: #555; } details.basis summary { cursor: pointer; }
+  details.basis div { padding: 2px 0 2px 12px; border-left: 3px solid #ccc; margin: 2px 0; }
   .grph { padding: 4px 0; border-bottom: 2px solid #000; margin-bottom: 2px; }
   .subh { font-weight: bold; font-size: 12px; color: #555; margin: 6px 0 2px; }
   details.rest { margin-top: 6px; } details.rest summary { cursor: pointer; color: #666; font-size: 12px; }
@@ -38,6 +45,8 @@
 </style>
 </head>
 <body>
+<div id="busy"><span></span><div class="track"><div class="bar"></div></div></div>
+<p style="margin:0 0 8px"><a href="index.html" onclick="this.href = 'index.html' + location.search" style="font-weight:700">← 返回正式界面</a></p>
 <h3>日报越狱 · 调试页 <span id="msg"></span></h3>
 <div class="row">
   <button onclick="call('get_state')">状态</button>
@@ -70,7 +79,16 @@
       <option value="">沿用上次</option><option value="1">低</option><option value="2">中</option><option value="3">高</option><option value="4">紧急</option></select></label>
     <label>每日工时 <input id="hours" type="number" step="0.5" min="0.5" max="24" size="4"></label>
   </fieldset>
-  <fieldset><legend>采集（git / Claude Code / Codex 自动读取，没装的自动跳过）</legend>
+  <fieldset><legend>AI 工具（用本机已有的 Claude Code / Codex 写日报，自动找，一般不用动）</legend>
+    <span id="aibtns">
+      <button type="button" onclick="checkAi(false)">检测（秒回：找到哪些、版本）</button>
+      <button type="button" onclick="checkAi(true)">检测并试一下（慢：逐个真调用，确认真能用）</button>
+    </span>
+    <div id="ai_result" style="margin:6px 0"></div>
+    <label>手动指定路径（一行一个；留空 = 自动找。装在特殊位置，或公司给了个 claude-ds.cmd 之类的启动脚本，就填它的完整路径）<br>
+      <textarea id="ai_paths" rows="2" placeholder="例如 C:\tools\claude-ds.cmd"></textarea></label>
+  </fieldset>
+  <fieldset><legend>采集（git / SVN / Claude Code / Codex 自动读取，没装的自动跳过）</legend>
     <label>每 <input id="collect_every_hours" type="number" min="1" max="24" style="width:50px"> 小时采集一次</label><br>
     <label>额外 git 目录（一行一个）<br><textarea id="extra_repos" rows="2"></textarea></label>
     <label>数据目录（留空 = D:\工作）<input id="data_dir" size="30"></label>
@@ -93,18 +111,65 @@
   const $ = id => document.getElementById(id), out = $('out'), msg = $('msg');
   const TEXT = ['username', 'data_dir', 'interrogate_time', 'submit_time'];
   const NUM = ['hours', 'collect_every_hours', 'priority'];
-  const LINES = ['extra_repos', 'holidays', 'workdays', 'leave_days'];
+  const LINES = ['extra_repos', 'holidays', 'workdays', 'leave_days', 'ai_paths'];
   const SELECTS = ['default_project', 'task_type', 'report_user'];
 
+  // 慢操作（要等几秒到几十秒）一律显示置顶进度条 + 已用秒数，别让用户对着没反应的界面干等
+  const SLOW = { collect_now: '正在搜身：读取 git / SVN / 对话记录', interrogate_now: 'AI 正在整理日报（约 30–60 秒）',
+    submit_now: '正在提交到日报系统', fetch_options: '正在连接日报系统', check_ai: '正在检测 AI 工具' };
+  const busyList = [];  // 正在进行的慢操作
+  setInterval(() => {
+    const b = busyList[busyList.length - 1], el = $('busy');
+    const secs = b ? Math.floor((Date.now() - b.t0) / 1000) : 0;
+    el.style.display = b && Date.now() - b.t0 > 400 ? 'block' : 'none';  // 秒回的操作不闪一下
+    if (b) el.querySelector('span').textContent = `⏳ ${b.label}… 已用 ${secs} 秒`;
+  }, 300);
+
   async function call(name, ...args) {
-    msg.textContent = name + ' 进行中…';
+    msg.textContent = '';
+    const b = SLOW[name] && { label: SLOW[name], t0: Date.now() };
+    if (b) busyList.push(b);
     try {
       const r = await window.pywebview.api[name](...args);
       out.textContent = JSON.stringify(r, null, 1);
-      msg.textContent = '';
       if (['collect_now', 'interrogate_now', 'submit_now', 'add_note', 'remove_note'].includes(name)) refresh();
       return r;
     } catch (e) { msg.textContent = name + ' 失败：' + (e.message || e); }
+    finally { if (b) busyList.splice(busyList.indexOf(b), 1); }
+  }
+
+  // 检测 AI 工具：先秒出找到了哪几个，再逐个真调用，每测完一个更新一行，并有 N/总数 的进度条
+  async function checkAi(deep) {
+    const btns = document.querySelectorAll('#aibtns button'), box = $('ai_result');
+    btns.forEach(b => b.disabled = true);
+    try {
+      box.textContent = '正在查找……';
+      const list = await call('check_ai', false);
+      if (!list) { box.textContent = ''; return; }
+      if (!list.length) {
+        box.innerHTML = '<b style="color:#d7263d">没找到 claude 或 codex。</b>命令行、桌面版、VS Code / Cursor 插件里都没有；装了的话在下面「手动指定路径」填上完整路径再检测。';
+        return;
+      }
+      const paint = (states, done) => {
+        box.innerHTML = (deep ? `<progress max="${list.length}" value="${done}" style="width:100%"></progress> <small>${done} / ${list.length}</small>` : '')
+          + list.map((it, i) => {
+            const s = states[i];
+            const mark = s === 'wait' ? '· 等待' : s === 'run' ? '⏳ 正在真实调用，请稍等…' : s === 'skip' ? '' : s.ok ? `<b style="color:#2e7d32">✓ 能用</b>（${esc(s.note)}）` : `<b style="color:#d7263d">✗ 不能用</b> ${esc(s.note)}`;
+            return `<div class="ent"><b>${esc(it.name)}</b> ${esc(it.version || '（版本读不出）')} ${mark}<br><small>${esc(it.path)}</small></div>`;
+          }).join('');
+      };
+      const states = list.map(() => (deep ? 'wait' : 'skip'));
+      paint(states, 0);
+      if (!deep) return;
+      for (let i = 0; i < list.length; i++) {
+        states[i] = 'run'; paint(states, i);
+        const r = await call('check_ai', true, list[i].path);
+        states[i] = r && r[0] ? r[0] : { ok: false, note: '检测失败' };
+        paint(states, i + 1);
+      }
+      const ok = states.filter(s => s.ok).length;
+      msg.textContent = ok ? `检测完成：${ok} 个能用，软件会按上面的顺序依次尝试` : '没有一个能用，请看上面每个的原因';
+    } finally { btns.forEach(b => b.disabled = false); }
   }
 
   function fill(c) {
@@ -180,12 +245,16 @@
   }
 
   function draftCard(it, i) {
-    return `<div class="it ${it.doubt ? 'doubt' : ''}">`
+    const basis = it.basis || [];  // 这条日报依据的证据原文；手填的没有
+    return `<div class="it ${it.doubt ? 'doubt' : ''}" data-basis="${esc(JSON.stringify(basis))}">`
       + `项目 <select class="d-proj">${projOptions(it.projectId, null)}</select> `
-      + `工时 <input class="d-hrs" type="number" min="0.5" max="24" step="0.5" style="width:60px" value="${it.workTime}"> 小时 `
-      + `完成 <input class="d-pct" type="number" min="0" max="100" step="5" style="width:60px" value="${it.completionDegree}">% `
+      + `工时 <input class="d-hrs" type="number" min="0.5" max="24" step="0.5" style="width:60px" value="${it.workTime}" title="按依据的体量自动分配，可以改"> 小时 `
+      + `完成 <input class="d-pct" type="number" min="0" max="100" step="5" style="width:60px" value="${it.completionDegree}" title="按依据的状态自动判断（有提交、有没有说待验证），可以改">% `
       + (it.doubt ? '<span class="stamp">存疑</span> ' : '') + `<a href="#" onclick="delItem(${i}); return false">删除这条</a>`
-      + `<textarea class="d-txt" rows="${Math.max(3, it.workInfo.split('\n').length + 1)}">${esc(it.workInfo)}</textarea></div>`;
+      + `<textarea class="d-txt" rows="${Math.max(3, it.workInfo.split('\n').length + 1)}">${esc(it.workInfo)}</textarea>`
+      + (basis.length ? `<details class="basis"><summary>依据 ${basis.length} 条（工时、完成度都是按这些算的，点开核对）</summary>`
+        + basis.map(b => `<div>${esc(b)}</div>`).join('') + '</details>' : '<small>手填的，没有自动依据</small>')
+      + '</div>';
   }
 
   const readDraft = () => [...document.querySelectorAll('#view .it')].map(el => ({
@@ -194,6 +263,7 @@
     workTime: Number(el.querySelector('.d-hrs').value),
     completionDegree: Number(el.querySelector('.d-pct').value),
     doubt: false,  // 人看过、选过了就不再存疑
+    basis: JSON.parse(el.dataset.basis || '[]'),  // 依据原样带回去，保存草稿不会把它弄丢
   })).filter(x => x.workInfo);
 
   function setItems(items) {  // 加/删只改页面上的草稿，点「保存草稿」才落盘

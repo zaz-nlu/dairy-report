@@ -1,6 +1,7 @@
 """入口：pywebview 窗口 + pystray 托盘 + 调度线程。python app.py [--tray]（--tray = 开机自启时只进托盘）"""
 import json
 import logging
+import os
 import socket
 import sys
 import threading
@@ -14,7 +15,7 @@ from PIL import Image
 import config
 from bridge import Api
 
-PORT = 47561  # 单实例锁：只用来占位和接收"唤起窗口"
+PORT = int(os.environ.get("DAILY_PRISON_PORT", 47561))  # 单实例锁：占位 + 接收"唤起窗口"。环境变量只给测试用（同时开两个实例）
 log = logging.getLogger("daily-prison")
 
 
@@ -41,6 +42,11 @@ def main():
     config.APP_DIR.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(filename=config.APP_DIR / "app.log", encoding="utf-8", level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
+    if sys.stdout is None or sys.stderr is None:  # 打包成无控制台程序后没有 stdout：任何 print 都会报错，先接到空设备上
+        sys.stdout = sys.stderr = open(os.devnull, "w", encoding="utf-8")
+    # 没控制台的程序出了错，用户什么都看不到：未捕获的异常（主线程 / 子线程）一律写进日志，朋友电脑上排错全靠它
+    sys.excepthook = lambda *e: log.critical("未捕获的异常", exc_info=e)
+    threading.excepthook = lambda a: log.critical("线程里未捕获的异常 %s", a.thread, exc_info=(a.exc_type, a.exc_value, a.exc_traceback))
     sock = single_instance()
     api = Api()
     window = webview.create_window("日报越狱", str(resource("ui/index.html")), js_api=api,
@@ -80,7 +86,7 @@ def main():
                 icon.title = api._tray_title()
             except Exception:
                 log.exception("调度出错")
-            time.sleep(30)
+            time.sleep(5 if api._pending else 30)  # 确认倒计时进行中，查得勤一点，不然 60 秒会拖成 90 秒
 
     icon = pystray.Icon("daily-prison", Image.open(resource("ui/img/icon.png")), "日报越狱", menu=pystray.Menu(
         pystray.MenuItem("打开", show, default=True),
@@ -94,7 +100,7 @@ def main():
     icon.run_detached()
     threading.Thread(target=listen, daemon=True).start()
     threading.Thread(target=loop, daemon=True).start()
-    log.info("启动")
+    log.info("启动（%s，Python %s）", "打包版" if getattr(sys, "frozen", False) else "源码", sys.version.split()[0])
     webview.start()
 
 

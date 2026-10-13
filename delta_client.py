@@ -40,12 +40,16 @@ def _li(html):
 
 class Delta:
     def __init__(self, username, password, base=BASE):
-        self.base, self.token = base, None
+        self.base, self.token, self._cred = base, None, (username, password)
+        self._login()
+
+    def _login(self):
+        username, password = self._cred
         r = self._call("POST", "/sys/login", {"username": username, "password": password,
                                               "uuid": str(uuid.uuid4()), "captcha": "111"})  # 验证码不校验
         self.token = r["token"]
 
-    def _call(self, method, path, body=None, params=None):
+    def _call(self, method, path, body=None, params=None, _retry=True):
         url = self.base + path + ("?" + urlencode(params) if params else "")
         req = Request(url, method=method, data=json.dumps(body).encode() if body is not None else None,
                       headers={"Content-Type": "application/json;charset=UTF-8", "token": self.token or ""})
@@ -55,7 +59,13 @@ class Delta:
         except OSError as e:
             raise DeltaError(f"连不上日报系统：{e}") from e
         if data.get("code") != 0:
-            raise DeltaError(f"{path}: {data.get('msg') or data}")
+            msg = data.get("msg") or ""
+            # 日报系统一个账号同一时间只认最近一次登录：别处（网页、另一个请求）登录过，这边的 token 就作废。
+            # 作废了就重新登录再试一次，不然 18:00 提交到一半被踢掉就白费了
+            if _retry and path != "/sys/login" and getattr(self, "_cred", None) and (data.get("code") == 401 or "token" in msg and "失效" in msg):
+                self._login()
+                return self._call(method, path, body, params, _retry=False)
+            raise DeltaError(f"{path}: {msg or data}")
         return data
 
     def projects(self):
@@ -93,6 +103,48 @@ class Delta:
             if len(out) >= limit:
                 break
         return out
+
+    def my_reports(self, days=400):
+        """本人在日报系统里最近 days 天的每一天，新→旧：[{date, id, hours, leave, holiday, missed, projects:[项目名]}]。
+        系统给每天都建一行：漏交的日子次日凌晨 1 点自动补一条 0 工时、备注「系统自动补全」的空日报，节假日 / 周末
+        系统自己标 isHolidays=1。所以：有工时或请假 = 交了；0 工时且不是节假日也没请假 = 漏交（罚款就是这么来的）。
+        档案室、连续天数、罚款账本都以它为准。一页 100 条，翻页取完（400 天约 4 页）"""
+        today, rows, page = date.today(), [], 1
+        while True:
+            r = self._call("GET", "/dailymain/list", params={
+                "page": page, "limit": 100, "isself": 1, "start": (today - timedelta(days=days)).isoformat(),
+                "end": today.isoformat()})["page"]
+            rows += r["list"]
+            if not r["list"] or len(rows) >= int(r.get("totalCount") or 0) or page >= 10:
+                break
+            page += 1
+        out = []
+        for m in sorted(rows, key=lambda r: str(r.get("dateTime")), reverse=True):
+            hours, leave, holiday = float(m.get("allWorkTime") or 0), str(m.get("isLeave")) == "1", str(m.get("isHolidays")) == "1"
+            out.append({"date": str(m["dateTime"])[:10], "id": int(m["id"]), "hours": hours, "leave": leave, "holiday": holiday,
+                        "missed": hours <= 0 and not leave and not holiday, "projects": _li(m.get("isHaveProject"))})
+        return out
+
+    def report_detail(self, main_id):
+        """某一天日报的完整内容：{remark, items:[{projectId, workInfo, workTime, completionDegree}]}，projectId 形如 7-296"""
+        r = self._call("GET", f"/dailymain/info/{main_id}")
+        return {"remark": (r.get("dailyMain") or {}).get("remark") or "",
+                "items": [{"projectId": f"{d.get('groupId')}-{d.get('isProjTaskId')}", "workInfo": d.get("workInfo") or "",
+                           "workTime": float(d.get("workTime") or 0), "completionDegree": int(float(d.get("completionDegree") or 0))}
+                          for d in r.get("daily") or []]}
+
+    def verify(self, day, items):
+        """提交后回读核对（只读）：系统里当天的日报，条数和总工时是否和刚提交的一致。返回 (是否一致, 说明)。
+        只比条数和工时，不比文字——服务器可能改写换行 / 转义，比文字会误报"""
+        main = self.find_main(day)
+        if not self._done(main):
+            return False, "回读时系统里没看到当天的日报"
+        rows = self.report_detail(int(main["id"]))["items"]
+        want = round(sum(float(i["workTime"]) for i in items), 1)
+        got = round(sum(r["workTime"] for r in rows), 1)
+        if len(rows) != len(items) or abs(want - got) > 0.05:
+            return False, f"系统里现有 {len(rows)} 条、{got} 小时，和提交的 {len(items)} 条、{want} 小时不一致"
+        return True, f"系统里现有 {len(rows)} 条、共 {got} 小时，和提交的一致"
 
     def last_defaults(self):
         """从本人最近一份有工时的日报，读出上次选的 项目/任务类型/汇报人/优先级 —— 用户不用手填默认值。
