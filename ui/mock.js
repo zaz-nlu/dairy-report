@@ -49,7 +49,7 @@
       notes: [{ time: '15:00', text: '开了需求评审会' }], collected_at: `${today}T11:00:00`,
       draft: { provider: 'claude', generated_at: `${today}T11:41:00`, items: clone(sc.draft || ITEMS) },
       result: sc.result ? { ...sc.result, error: sc.result.error || null, items: clone(sc.draft || ITEMS), at: `${today}T${sc.result.at}` } : null,
-      cfg: { username: 'liuyuchen', sources: ['git', 'claude', 'codex'], extra_repos: [], data_dir: '', collect_every_hours: 4, interrogate_time: '17:30',
+      cfg: { username: 'liuyuchen', sources: ['git', 'claude', 'codex'], extra_repos: [], data_dir: '', collect_every_hours: 4, interrogate_time: '17:30', remind_times: ['18:30', '19:00'],
         submit_time: '18:00', hours: 8, fine: 100, confirm_seconds: 60, default_project: null, task_type: null, report_user: null, priority: null, holidays: ['2026-10-01'], workdays: [], leave_days: [],
         repo_projects: {}, ai_paths: [], lookback_days: 1, has_password: !sc.fresh, autostart: false },
       configured: !sc.fresh,

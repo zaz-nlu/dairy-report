@@ -73,6 +73,7 @@ hide_window() / quit_app()
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -120,6 +121,7 @@ class Api:
         self._last_collect = None
         self._interrogate_failed_at = None
         self._archive = None   # (时间戳, 日报系统里的日报概要, 账号)，见 _remote_archive
+        self._reminded = set()  # 已经提醒过的 (日期, 时刻)，见 _remind
         self._pending = None   # 到点后的提交确认倒计时 {day, deadline(datetime), cancelled}，见 _confirm_ok
 
     # ---------- 内部 ----------
@@ -408,6 +410,24 @@ class Api:
                          and now >= datetime.fromisoformat(r["at"]) + timedelta(minutes=RETRY_MINUTES[r["attempts"] - 1]))
             if retry_due or ((r is None or filled_later) and self._confirm_ok(day, now, cfg)):
                 self._submit(day, auto=True)
+            self._remind(day, now, cfg, minute, _read(folder / "result.json"))
+
+    def _remind(self, day, now, cfg, minute, r):
+        """过了提交时间、日报还没交上：每到一个 remind_times 里的时刻提醒一次（托盘气泡 + 窗口内提示）。
+        软件在 19:40 才启动的话只提醒最近的那一个，不一口气补发一串"""
+        if r and r["status"] in ("submitted", "exists"):
+            return
+        p = self._pending
+        if p and p["day"] == day.isoformat() and not p["cancelled"]:
+            return   # 确认倒计时进行中，马上就自动交了
+        due = sorted(t for t in cfg["remind_times"] if re.fullmatch(r"\d{1,2}:\d{2}", str(t)) and minute >= _minutes(t))
+        if not due or (day, due[-1]) in self._reminded:
+            return
+        self._reminded |= {(day, t) for t in due}
+        why = {"empty": "认罪书是空的，去手填或补一句手记", "failed": "上次提交失败了"}.get((r or {}).get("status"))
+        if (p or {}).get("cancelled"):
+            why = "你取消了自动提交"
+        self._notify("典狱长：还没画押！", f"{why or '今天的日报还没交'}，现在去点「签字画押」，漏交罚 ¥{cfg['fine']}")
 
     def _confirm_ok(self, day, now, cfg):
         """到点后的首次自动提交先给用户一个确认窗口：弹出窗口 + 倒计时 confirm_seconds 秒，不理它就提交。

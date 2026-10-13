@@ -159,6 +159,10 @@ const settle = async () => { await until(() => store.regenerating, 3000); await 
     const fineInp = $$('.office label.f').find(l => l.textContent.includes('漏交罚款')).querySelector('input'); type(fineInp, '50'); await wait(100);
     btn('保存设置').click(); await wait(1200); await until(() => store.s.fine === 50, 3000);
     log('设置里改罚款金额 -> 后端保存', store.s.fine === 50, 'fine=' + store.s.fine);
+    const rem = () => $$('.office label.f').find(l => l.textContent.includes('没交成时提醒')).querySelector('input');
+    log('设置里有「没交成时提醒」，默认 18:30、19:00', rem().value === '18:30，19:00');
+    type(rem(), '18:45 19:15，坏格式,9:05'); await wait(100); btn('保存设置').click(); await wait(1200);
+    log('提醒时间保存：格式不对的丢掉，补零', JSON.stringify((await API.quiet('get_config')).remind_times) === '["18:45","19:15","09:05"]', JSON.stringify((await API.quiet('get_config')).remind_times));
     store.page = 'home'; await act.loadLedger(); await wait(300);   // 不能 scenario()：它会重置假后端，罚款又变回 100
     log('改成 50 后：侧栏标语、账本金额跟着变，不是写死的 100', $('.ruler-foot').textContent.includes('¥50') && store.ledger.fines === store.ledger.missed * 50 && $('.card.tr').textContent.includes('¥' + store.ledger.fines), $('.ruler-foot').textContent.trim());
     store.page = 'office'; await wait(300);
@@ -188,6 +192,12 @@ const settle = async () => { await until(() => store.regenerating, 3000); await 
     log('倒计时在走', t1 !== t2, t1 + ' -> ' + t2);
     log('确认窗口有三个按钮：立即提交 / 去改一改 / 取消', !!btn('立即提交') && !!btn('去改一改') && !!btn('取消本次自动提交'));
     log('倒计时期间木牌是「正在画押」而不是「越狱失败」', $('.sign-wrap').className.includes('mode-pending') && !$('.sign-wrap').className.includes('mode-late'));
+    // 回归：确认窗口里点「取消」，二次确认必须盖在上面、点得到（以前被压在下面）
+    btn('取消本次自动提交').click(); await until(() => store.dialog, 2000); await wait(200);
+    const ab = $$('.ask-dim .btn').find(b => b.textContent.includes('算了')), r = ab.getBoundingClientRect();
+    log('确认窗口里点取消：二次确认在最上层，点得到', document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2) === ab);
+    act.answer(false); await wait(300);
+    log('选「算了」：二次确认关掉，确认窗口还在', !store.dialog && !!$('.confirm-dialog'));
     // 去改一改：窗口收起 + 宽限 10 分钟 + 跳到认罪书 + 顶部小倒计时条
     btn('去改一改').click(); await until(() => $('.pendingbar'), 3000); await wait(300);
     log('去改一改：弹窗收起，顶部出现小倒计时条', !$('.confirm-dialog') && !!$('.pendingbar') && store.page === 'draft');

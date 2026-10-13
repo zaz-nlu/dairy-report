@@ -48,7 +48,7 @@ window.COMPONENTS['ai-check'] = {
 };
 
 window.PAGES.office = {
-  data: () => ({ cfg: null, pw: '', extraText: '', aiText: '', autostart: false, saving: false, verified: false, orig: '' }),
+  data: () => ({ cfg: null, pw: '', extraText: '', aiText: '', remindText: '', autostart: false, saving: false, verified: false, orig: '' }),
   async activated() {
     await API.safe(async () => {
       if (!store.cfg) await act.loadCfg();
@@ -65,10 +65,12 @@ window.PAGES.office = {
   methods: {
     load() {
       this.cfg = JSON.parse(JSON.stringify(store.cfg));
-      this.extraText = (this.cfg.extra_repos || []).join('\n'); this.aiText = (this.cfg.ai_paths || []).join('\n');
+      this.extraText = (this.cfg.extra_repos || []).join('\n'); this.aiText = (this.cfg.ai_paths || []).join('\n'); this.remindText = (this.cfg.remind_times || []).join('，');
       this.autostart = !!this.cfg.autostart; this.pw = '';
       this.orig = JSON.stringify(this.pack());
     },
+    // 「18:30，19:00」→ ["18:30","19:00"]；格式不对的丢掉
+    times: t => t.split(/[,，、;；\s]+/).map(x => x.replace('：', ':').match(/^(\d{1,2}):(\d{2})$/)).filter(m => m && +m[1] < 24 && +m[2] < 60).map(m => m[1].padStart(2, '0') + ':' + m[2]),
     lines: t => t.split('\n').map(x => x.trim()).filter(Boolean),
     // 要保存的字段（只发设置页管的这些，别把别处管的 repo_projects 等覆盖掉）
     pack() {
@@ -77,6 +79,7 @@ window.PAGES.office = {
         interrogate_time: c.interrogate_time, submit_time: c.submit_time, confirm_seconds: Number.isFinite(Number(c.confirm_seconds)) && c.confirm_seconds !== '' && c.confirm_seconds !== null ? Math.max(0, Math.round(Number(c.confirm_seconds))) : 60, fine: Number.isFinite(Number(c.fine)) && c.fine !== '' && c.fine !== null ? Number(c.fine) : 100, data_dir: (c.data_dir || '').trim(),
         default_project: c.default_project || null, task_type: c.task_type || null, report_user: c.report_user || null,
         priority: c.priority ? Number(c.priority) : null,
+        remind_times: this.times(this.remindText),
         extra_repos: this.lines(this.extraText), ai_paths: this.lines(this.aiText),
         holidays: c.holidays, workdays: c.workdays, leave_days: c.leave_days };
     },
@@ -132,6 +135,7 @@ window.PAGES.office = {
     <section class="card"><div class="card-title"><ico name="bell" :size="24"/><span>{{ S.office.times }}</span></div>
       <div class="form"><label class="f"><span>{{ S.office.interrogateAt }}</span><input class="inp" type="time" v-model="cfg.interrogate_time"></label>
         <label class="f"><span>{{ S.office.submitAt }}</span><input class="inp" type="time" v-model="cfg.submit_time"></label>
+        <label class="f"><span>{{ S.office.remindAt }}</span><input class="inp" v-model="remindText" placeholder="18:30，19:00"></label>
         <label class="f"><span>{{ S.office.confirmSec }}</span><input class="inp num" type="number" min="0" max="600" step="10" v-model.number="cfg.confirm_seconds"></label>
         <label class="f"><span>{{ S.office.fine }}</span><input class="inp num" type="number" min="0" step="10" v-model.number="cfg.fine"></label>
         <label class="row" style="padding-bottom:6px"><input type="checkbox" class="chk" v-model="autostart"> {{ S.office.autostart }}</label></div></section>

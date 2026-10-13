@@ -386,9 +386,37 @@ def test_history_counts_manual_days():
         assert f.exists()
 
 
+def test_reminders_when_not_submitted():
+    """取消了自动提交 -> 过了 remind_times 每个时刻提醒一次；交上之后不再提醒；晚启动只补最近一个"""
+    R = "典狱长：还没画押！"
+    with tempfile.TemporaryDirectory() as tmp:
+        api, cfg = make_api(tmp, [ITEM])
+        cfg["confirm_seconds"] = 60
+        api._last_collect = at("17:00"); FakeDelta.calls = []
+        api.tick(at("17:30")); api.tick(at("18:00"))
+        assert api._pending and api.log.count(R) == 0
+        api.cancel_pending()
+        api.tick(at("18:29")); assert api.log.count(R) == 0
+        api.tick(at("18:30")); api.tick(at("18:31")); assert api.log.count(R) == 1   # 一个时刻只提醒一次
+        api.tick(at("19:00")); assert api.log.count(R) == 2
+        assert FakeDelta.calls == []   # 取消了就不会自动交
+        cfg["remind_times"] = ["18:30", "坏格式", "19:00"]
+        api._reminded.clear(); api.log.clear()
+        api.tick(at("19:40")); assert api.log.count(R) == 1   # 晚启动：只补一条，坏格式忽略
+        api.submit_now()
+        api.log.clear(); api._reminded.clear()
+        api.tick(at("20:00")); assert api.log.count(R) == 0   # 交上了就不提醒
+    with tempfile.TemporaryDirectory() as tmp:    # 提醒关掉
+        api, cfg = make_api(tmp, [])
+        cfg["remind_times"] = []
+        api._last_collect = at("17:00")
+        api.tick(at("17:30")); api.tick(at("18:00")); api.tick(at("19:00"))
+        assert R not in api.log
+
+
 if __name__ == "__main__":
     for t in (test_normal_day, test_retry_then_give_up, test_catch_up_after_sleep,
               test_empty_day_not_fabricated, test_morning_draft_refreshed_unless_edited, test_weekend_and_leave,
-              test_interrogate_backoff, test_backlog_across_days, test_verify_after_submit, test_ledger_and_missed_days, test_confirm_countdown, test_history_counts_manual_days):
+              test_interrogate_backoff, test_backlog_across_days, test_verify_after_submit, test_ledger_and_missed_days, test_confirm_countdown, test_history_counts_manual_days, test_reminders_when_not_submitted):
         t()
     print("ok")

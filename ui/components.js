@@ -99,7 +99,7 @@ window.COMPONENTS = window.COMPONENTS || {};
 
   // ---------- 确认框 ----------
   C['ask-dialog'] = {
-    template: `<div v-if="store.dialog" class="dim" @click.self="act.answer(false)"><div class="dialog card">
+    template: `<div v-if="store.dialog" class="dim ask-dim" @click.self="act.answer(false)"><div class="dialog card">
       <p>{{ store.dialog.msg }}</p><div class="row"><button class="btn" @click="act.answer(false)">{{ store.dialog.no }}</button>
       <button class="btn primary" @click="act.answer(true)">{{ store.dialog.yes }}</button></div></div></div>`,
   };

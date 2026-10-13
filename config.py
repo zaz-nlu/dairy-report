@@ -24,6 +24,7 @@ DEFAULTS = {
     "collect_every_hours": 4,
     "interrogate_time": "17:30",
     "submit_time": "18:00",
+    "remind_times": ["18:30", "19:00"],   # 过了提交时间还没交成（取消了 / 失败 / 草稿空），在这些时刻提醒一次；空 = 不提醒
     "hours": 8.0,
     "default_project": None,    # 日报系统的 projectId，如 "7-296"；None = 沿用上次日报（task_type/report_user 同）
     "task_type": None,          # projectTypeId

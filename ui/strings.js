@@ -108,7 +108,7 @@ window.S = {
     aiNone: '没找到 claude 或 codex。命令行、桌面版、VS Code / Cursor 插件里都没有；装了的话在上面填上完整路径再检测。',
     aiOk: '能用', aiBad: '不能用', aiWait: '等待', aiRun: '正在真实调用，请稍等…', aiNoVersion: '（版本读不出）',
     collect: '搜身（采集）', interval: '搜身间隔（小时）', extraRepos: '额外 git 目录（一行一个）', dataDir: '数据目录（留空 = D:\\工作）',
-    times: '放风时间', interrogateAt: '审讯（出草稿）', submitAt: '自动画押', autostart: '开机自启（缩进托盘守着）',
+    times: '放风时间', interrogateAt: '审讯（出草稿）', submitAt: '自动画押', remindAt: '没交成时提醒（多个用逗号隔开，留空 = 不提醒）', autostart: '开机自启（缩进托盘守着）',
     dates: '日期', holidays: '法定节假日（休息）', workdays: '调休上班的周末', leaves: '请假（会提交请假记录）',
     datesHint: '周六日默认休息。', addDate: '添加',
     debug: '调试页', debugHint: '排错用，功能齐但难看。', quit: '保外就医（退出软件）', hide: '放风（缩进托盘）',

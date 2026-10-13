@@ -136,6 +136,7 @@ a { color: var(--blue); }
 .toast { padding: 8px 12px; border: var(--b); box-shadow: 3px 3px 0 #000; background: var(--yellow); font-size: 13.5px; cursor: pointer; animation: pop .25s; word-break: break-all; }
 .toast.k-err { background: var(--red); color: #fff; font-weight: 700; } .toast.k-ok { background: #b6e3a8; }
 .dim { position: fixed; inset: 0; z-index: 70; background: rgba(0, 0, 0, .55); display: grid; place-items: center; }
+.ask-dim { z-index: 75; }  /* 盖在确认倒计时弹窗（也是 .dim）上面，不然「取消」的二次确认被压在下面点不到 */
 .dialog { width: 400px; max-width: 90vw; } .dialog p { font-size: 15px; margin: 6px 0 16px; } .dialog .row { justify-content: flex-end; }
 
 /* ---------- 动画 ---------- */
